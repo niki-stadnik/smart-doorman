@@ -32,14 +32,6 @@ const char * key = KEY;
 WebSocketsClient webSocket;
 Stomp::StompClient stomper(webSocket, ws_host, ws_port, ws_baseurl, true);
 unsigned long keepAlive = 0;
-boolean bootFlag = false;
-
-//Timer Interrupt
-hw_timer_t *Timer0_Cfg = NULL;
-void IRAM_ATTR Timer0_ISR(){
-    if(bootFlag)ESP.restart();
-    bootFlag = true;
-}
 
 
 const int relayPin = 25;
@@ -54,17 +46,19 @@ boolean bell = false;
 boolean rfid = false;
 
 
-
 unsigned long sendtimeing = 0;
 
 
 
 void setup() {
-  //Timer Interrupt
-  Timer0_Cfg = timerBegin(0, 80, true);
-  timerAttachInterrupt(Timer0_Cfg, &Timer0_ISR, true);
-  timerAlarmWrite(Timer0_Cfg, 30000000, true); //5 000 000us = 5s timer, 30 000 000us = 30s
-  timerAlarmEnable(Timer0_Cfg);
+  //GPIO setup
+  pinMode(doorOpenPin, INPUT_PULLDOWN);
+  pinMode(doorButtonPin, INPUT_PULLDOWN);
+  pinMode(bellPin, INPUT_PULLDOWN);
+
+  pinMode(relayPin, OUTPUT);
+  digitalWrite(relayPin, LOW);
+
 
   // setup serial
   debugStart(115200);
@@ -92,14 +86,6 @@ void setup() {
     stomper.begin();
   }
 
-
-  //GPIO setup
-  pinMode(doorOpenPin, INPUT_PULLDOWN);
-  pinMode(doorButtonPin, INPUT_PULLDOWN);
-  pinMode(bellPin, INPUT_PULLDOWN);
-
-  pinMode(relayPin, OUTPUT);
-  digitalWrite(relayPin, LOW);
 }
 
 
@@ -135,7 +121,6 @@ void loop() {
     keepAlive = millis();
   }
 
-  bootFlag = false;
   
   if(millis() >= sendtimeing + 250){
 

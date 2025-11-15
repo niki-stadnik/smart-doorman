@@ -94,6 +94,7 @@ void setup() {
 void subscribe(Stomp::StompCommand cmd) {
   debugln("Connected to STOMP broker");
   stomper.subscribe("/topic/doorman", Stomp::CLIENT, handleMessage);    //this is the @MessageMapping("/test") anotation so /topic must be added
+  stomper.subscribe("/topic/rebootLightSwitch", Stomp::CLIENT, handleRebootDev);
   stomper.subscribe("/topic/keepAlive", Stomp::CLIENT, handleKeepAlive);
 }
 
@@ -101,6 +102,12 @@ Stomp::Stomp_Ack_t handleMessage(const Stomp::StompCommand cmd) {
   debugln(cmd.body);
   keepAlive = millis();
   getData(cmd.body);
+  return Stomp::CONTINUE;
+}
+Stomp::Stomp_Ack_t handleRebootDev(const Stomp::StompCommand cmd) {
+  debugln(cmd.body);
+  keepAlive = millis();
+  rebootDev();
   return Stomp::CONTINUE;
 }
 Stomp::Stomp_Ack_t handleKeepAlive(const Stomp::StompCommand cmd) {
@@ -160,14 +167,12 @@ void sendData(){
 void getData(String input){
   SudoJSON json = SudoJSON(input);
 
-  boolean relayRestart;
-  relayRestart = json.getPairB("relayRestart");
 
-  //restarts the other ESP32
-  if (relayRestart == true){
-    digitalWrite(relayPin, HIGH);
-    delay(2000);
-    digitalWrite(relayPin, LOW);
-  }
   
+}
+
+void rebootDev(){
+  digitalWrite(relayPin, HIGH);
+  delay(2000);
+  digitalWrite(relayPin, LOW);
 }

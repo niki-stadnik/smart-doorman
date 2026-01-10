@@ -69,9 +69,12 @@ void setup() {
   debugln("Logging into WLAN: " + String(wlan_ssid));
   debug(" ...");
   WiFi.begin(wlan_ssid, wlan_password);
+  int i = 0;
   while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
+    i++;
+    delay(200);
     debug(".");
+    if (i >= 25) ESP.restart(); // 5s / 200ms = 25
   }
   debugln(" success.");
   debug("IP: "); debugln(WiFi.localIP());
@@ -94,7 +97,8 @@ void setup() {
 void subscribe(Stomp::StompCommand cmd) {
   debugln("Connected to STOMP broker");
   stomper.subscribe("/topic/doorman", Stomp::CLIENT, handleMessage);    //this is the @MessageMapping("/test") anotation so /topic must be added
-  stomper.subscribe("/topic/rebootLightSwitch", Stomp::CLIENT, handleRebootDev);
+  stomper.subscribe("/topic/doorman/selfReboot", Stomp::CLIENT, selfReboot);
+  stomper.subscribe("/topic/lightSwitch/reboot", Stomp::CLIENT, handleRebootDev);
   stomper.subscribe("/topic/keepAlive", Stomp::CLIENT, handleKeepAlive);
 }
 
@@ -102,6 +106,11 @@ Stomp::Stomp_Ack_t handleMessage(const Stomp::StompCommand cmd) {
   debugln(cmd.body);
   keepAlive = millis();
   getData(cmd.body);
+  return Stomp::CONTINUE;
+}
+Stomp::Stomp_Ack_t selfReboot(const Stomp::StompCommand cmd) {
+  debugln(cmd.body);
+  ESP.restart();
   return Stomp::CONTINUE;
 }
 Stomp::Stomp_Ack_t handleRebootDev(const Stomp::StompCommand cmd) {
@@ -118,6 +127,7 @@ Stomp::Stomp_Ack_t handleKeepAlive(const Stomp::StompCommand cmd) {
 
 void error(const Stomp::StompCommand cmd) {
   debugln("ERROR: " + cmd.body);
+  ESP.restart();
 }
 
 
@@ -161,7 +171,7 @@ void sendData(){
   json.addPair("bell", bell);
   json.addPair("rfid", rfid);
   // Send the message to the STOMP server
-  stomper.sendMessage("/app/doorman", json.retrive());   //this is the @SendTo anotation
+  stomper.sendMessage("/app/device/doorman", json.retrive());   //this is the @SendTo anotation
 }
 
 void getData(String input){

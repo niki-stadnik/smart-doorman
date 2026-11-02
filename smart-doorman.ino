@@ -4,8 +4,8 @@
 #include "StompClient.h"
 #include "SudoJSON.h"
 #include <ArduinoOTA.h>
-#include <SPI.h>
-#include <MFRC522.h>
+#include <HardwareSerial.h>
+#include <Adafruit_PN532.h>
 
 #define NAME "smart-doorman"
 
@@ -42,34 +42,38 @@ unsigned long keepAlive = 0;
 
 
 const int relayPin = 25;
-const int doorOpenPin = 26;
-const int doorButtonPin = 27;
+const int doorButtonPin = 26;
 const int bellPin = 4;
 
 boolean doorOpen = false;
 boolean doorLock = false;
-boolean doorButton = false;
+boolean doorButton = true;
 boolean bell = false;
-boolean zeroFlagButt = false;
+boolean zeroFlagButt = true;
 boolean zeroFlagBell = false;
 const char* rfid = nullptr;
 
 
 unsigned long sendtimeing = 0;
 
-//MFRC522 setup
-#define RST_PIN   22
-#define SS_PIN    5
-MFRC522 mfrc522(SS_PIN, RST_PIN);
+// --- PIN CONFIGURATION (UART/HSU) ---
+#define PN532_RX_PIN 16  // Connects to TX on PN532
+#define PN532_TX_PIN 17  // Connects to RX on PN532
+Adafruit_PN532 nfc(255, &Serial2);
+
 const byte targetBlock = BLOCK; 
-MFRC522::MIFARE_Key sectorKey;
+const byte customKey[6] = KEYCARD;
+
+// Variables to track the currently present card to prevent spamming
+uint8_t lastScannedUid[7] = { 0 };
+uint8_t lastScannedUidLength = 0;
+bool cardWasPresentLastLoop = false;
 
 
 
 void setup() {
   //GPIO setup
-  pinMode(doorOpenPin, INPUT_PULLDOWN);
-  pinMode(doorButtonPin, INPUT_PULLDOWN);
+  pinMode(doorButtonPin, INPUT);
   pinMode(bellPin, INPUT_PULLDOWN);
 
   pinMode(relayPin, OUTPUT);
@@ -127,15 +131,19 @@ void setup() {
   }
 
   //RFID setup
-  SPI.begin();
-  mfrc522.PCD_Init();
-  mfrc522.PCD_SetAntennaGain(mfrc522.RxGain_max); // ADD THIS LINE TO BOOST RADIO POWER
-  Serial.println(F("Secure Reader Ready. Scan card..."));
-  // Create an array using your defined bytes
-  const byte customKey[6] = KEYCARD; 
-  for (byte i = 0; i < 6; i++) {
-    sectorKey.keyByte[i] = customKey[i];
+  // FORCE ESP32 Hardware Serial 2 to use pins 16 and 17 at the PN532's standard baud rate
+  Serial2.begin(115200, SERIAL_8N1, PN532_RX_PIN, PN532_TX_PIN);
+  delay(10);
+  nfc.begin();
+  Serial2.setTimeout(15);
+  uint32_t versiondata = nfc.getFirmwareVersion();
+  if (!versiondata) {
+    debugln("Didn't find PN532 board. Check wiring!");
+    ESP.restart();
   }
+  // Configure board to read RFID tags
+  nfc.SAMConfig();
+  debugln("PN532 Reader Ready. Scan card...");
 }
 
 
@@ -202,63 +210,127 @@ void loop() {
   if (shouldSend) {
     sendData();
   }
-
+/*
   if(millis() >= sendtimeing + 20000){
     sendData();
     sendtimeing = millis();
   }
-
+*/
   //RFID
-  if ( ! mfrc522.PICC_IsNewCardPresent() || ! mfrc522.PICC_ReadCardSerial() ) {
-    return;
-  }
-  debugln("Card detected. Authenticating sector...");
-  // STEP 1: Authenticate using Key A
-  MFRC522::StatusCode status;
-  status = mfrc522.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, targetBlock, &sectorKey, &(mfrc522.uid));
-  if (status != MFRC522::STATUS_OK) {
-    debug(F("Authentication failed: "));
-    debugln(mfrc522.GetStatusCodeName(status));
-    mfrc522.PICC_HaltA();
-    return;
-  }
-  // STEP 2: Read data from the block
-  byte buffer[18]; // Buffer must be at least 18 bytes to hold the 16-byte block + 2 bytes CRC
-  byte size = sizeof(buffer);
-  status = mfrc522.MIFARE_Read(targetBlock, buffer, &size);
-  if (status != MFRC522::STATUS_OK) {
-    debug(F("Reading block failed: "));
-    debugln(mfrc522.GetStatusCodeName(status));
-    mfrc522.PICC_HaltA();
-    mfrc522.PCD_StopCrypto1();
-    return;
-  }
-  // STEP 3: Check if the data matches the secret password
-  bool passwordMatch = true;
-  for (uint8_t i = 0; i < 15; i++) { // Compare the first 15 characters
-    if ((char)buffer[i] != PASSWORD[i]) {
-      passwordMatch = false;
-      break;
+  uint8_t success;
+  uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 };  // Buffer to store the returned UID
+  uint8_t uidLength;                        // Length of the UID (4 or 7 bytes depending on ISO14443A card type)
+
+  // Health check: every 5s (when no card is on the reader) verify the PN532 still answers
+  static unsigned long lastHealth = 0;
+  static uint8_t healthFails = 0;
+  if (!cardWasPresentLastLoop && millis() - lastHealth > 10000) {
+    lastHealth = millis();
+    while (Serial2.available()) Serial2.read();
+    if (nfc.getFirmwareVersion()) {
+      healthFails = 0;
+      rfid = "ok";
+      sendData();
+    } else if (++healthFails >= 2) {
+      debugln("PN532 unresponsive, re-initializing");
+      rfid = "unresponsive";
+      sendData();
+      //if (!initReader()) ESP.restart();   // last resort
+      healthFails = 0;
     }
   }
-  // STEP 4: Grant or Deny Access
-  if (passwordMatch) {
-    debugln(F("🔒 PASSWORD MATCH! Access Granted."));
-    rfid = KEYNAME;
-    sendData();
-  } else {
-    debugln(F("❌ WRONG PASSWORD. Access Denied."));
-    sendData();
-    // Print what was actually found on the card for debugging
-    debug(F("Found data: "));
-    for (uint8_t i = 0; i < 16; i++) {
-      debugwr(buffer[i]);
+  while (Serial2.available()) Serial2.read();   // flush before each poll
+
+  // Look for passive RFID tags
+  success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 50);
+  
+  if (success) {
+    // Check if this is the exact same card we processed on the previous loop turn
+    bool isSameCard = false;
+    if (cardWasPresentLastLoop && uidLength == lastScannedUidLength) {
+      isSameCard = true;
+      for (uint8_t i = 0; i < uidLength; i++) {
+        if (uid[i] != lastScannedUid[i]) {
+          isSameCard = false;
+          break;
+        }
+      }
     }
-    debugln();
+
+    // If it's the same card still sitting on the reader, skip processing entirely!
+    if (isSameCard) {
+      return; 
+    }
+
+    // New card detected! Save its ID immediately so we don't process it again next loop
+    cardWasPresentLastLoop = true;
+    lastScannedUidLength = uidLength;
+    memcpy(lastScannedUid, uid, uidLength);
+
+    debugln("New card detected. Authenticating...");
+
+
+    // Authenticate Sector 1, Block 0 (Absolute Block 4) using Key A
+    // We cast our customKey array to a non-const uint8_t pointer required by the library
+    success = nfc.mifareclassic_AuthenticateBlock(uid, uidLength, BLOCK, 0, (uint8_t*)customKey);
+    
+    if (!success) {
+      debugln("Authentication failed. Wrong Key!");
+      // --- FIX: Reset state machine on failure so it can try again ---
+      cardWasPresentLastLoop = false;
+      lastScannedUidLength = 0;
+      memset(lastScannedUid, 0, sizeof(lastScannedUid));
+
+      // Reset the chip state on authentication failure
+      nfc.SAMConfig();
+
+      return;
+    }
+    
+    // Read the 16-byte block
+    uint8_t buffer[16];
+    success = nfc.mifareclassic_ReadDataBlock(BLOCK, buffer);
+    
+    if (success) {
+      // Compare the data to our PASSWORD macro
+      bool passwordMatch = true;
+      const char* passwordString = PASSWORD;
+      
+      for (uint8_t i = 0; i < 15; i++) {
+        if ((char)buffer[i] != passwordString[i]) {
+          passwordMatch = false;
+          break;
+        }
+      }
+      
+      if (passwordMatch) {
+        debugln("🔒 PASSWORD MATCH! Access Granted.");
+        rfid = KEYNAME;
+        sendData();
+      } else {
+        debugln("❌ WRONG PASSWORD. Access Denied.");
+      }
+    } else {
+      debugln("Failed to read block data.");
+      // --- FIX: Reset state machine if the data read fails mid-stream ---
+      cardWasPresentLastLoop = false;
+      lastScannedUidLength = 0;
+      memset(lastScannedUid, 0, sizeof(lastScannedUid));
+    }
+
+    // --- FIX: Break the crypto lock by resetting the chip state ---
+    nfc.SAMConfig();
+
+  }else {
+    // If readPassiveTargetID returns false, no card is on the reader.
+    // Reset our tracker variables so the card can be scanned again when brought back.
+    if (cardWasPresentLastLoop) {
+      debugln("Card removed from reader.");
+      cardWasPresentLastLoop = false;
+      lastScannedUidLength = 0;
+      memset(lastScannedUid, 0, sizeof(lastScannedUid));
+    }
   }
-  // STEP 5: Clean up radio communications and encryption
-  mfrc522.PICC_HaltA();
-  mfrc522.PCD_StopCrypto1();
 }
 
 
@@ -274,7 +346,7 @@ void sendData(){
   
   // Construct the STOMP message
   SudoJSON json;
-  json.addPair("doorButton", doorButton);
+  json.addPair("doorButton", !doorButton);
   json.addPair("bell", bell);
   if(rfid != nullptr){
     json.addPair("rfid", rfid);
